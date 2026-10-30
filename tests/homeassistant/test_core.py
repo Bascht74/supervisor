@@ -12,7 +12,8 @@ from dbus_fast import DBusError
 import pytest
 from time_machine import travel
 
-from supervisor.const import CpuArch
+from supervisor.apps.app import App
+from supervisor.const import AppState, CpuArch
 from supervisor.coresys import CoreSys
 from supervisor.dbus.const import DBUS_ERR_SYSTEMD_NO_SUCH_UNIT
 from supervisor.docker.homeassistant import DockerHomeAssistant
@@ -44,7 +45,7 @@ from supervisor.resolution.const import ContextType, IssueType
 from supervisor.resolution.data import Issue
 from supervisor.updater import Updater
 
-from tests.common import AsyncIterator, load_json_fixture
+from tests.common import AsyncIterator, MockResponse, force_app_state, load_json_fixture
 from tests.dbus_service_mocks.base import DBusServiceMock
 from tests.dbus_service_mocks.systemd import Systemd as SystemdService
 from tests.dbus_service_mocks.systemd_unit import SystemdUnit as SystemdUnitService
@@ -744,6 +745,51 @@ async def test_restart(coresys: CoreSys, container: DockerContainer):
 
     container.restart.assert_called_once_with(t=260)
     container.stop.assert_not_called()
+
+
+async def test_restart_pushes_discovery_dropped_while_core_starting(
+    coresys: CoreSys,
+    container: DockerContainer,
+    install_app_ssh: App,
+    install_app_example: App,
+    websession: MagicMock,
+) -> None:
+    """Test discovery dropped while Core was starting is pushed once it runs.
+
+    A message the app has not sent since its restart waits for that send.
+    """
+    container.show.return_value["State"]["Status"] = "running"
+    container.show.return_value["State"]["Running"] = True
+    coresys.homeassistant.version = AwesomeVersion("2023.9.0")
+    coresys.homeassistant.api._ensure_access_token = AsyncMock()  # pylint: disable=protected-access
+    websession.request.return_value = MockResponse()
+    force_app_state(install_app_ssh, AppState.STARTED)
+    force_app_state(install_app_example, AppState.STARTED)
+    message = await coresys.discovery.send(install_app_ssh, "test", {})
+    await coresys.discovery.send(install_app_example, "test", {})
+    await coresys.block_till_done()
+
+    # Both apps restart while Core is still starting, only one sends
+    coresys.homeassistant.api.get_api_state.return_value = APIState("STARTING", False)
+    force_app_state(install_app_ssh, AppState.STOPPED)
+    force_app_state(install_app_ssh, AppState.STARTED)
+    force_app_state(install_app_example, AppState.STOPPED)
+    force_app_state(install_app_example, AppState.STARTED)
+    await coresys.discovery.send(install_app_ssh, "test", {})
+    await coresys.block_till_done()
+    websession.request.reset_mock()
+
+    # The restart of Core waits until Core is running
+    coresys.homeassistant.api.get_api_state.return_value = APIState("RUNNING", False)
+    with patch("supervisor.homeassistant.core.asyncio.sleep"):
+        await coresys.homeassistant.core.restart()
+    await coresys.block_till_done()
+
+    websession.request.assert_called_once()
+    assert (
+        str(websession.request.call_args.args[1])
+        == f"http://172.30.32.1/api/hassio_push/discovery/{message.uuid}"
+    )
 
 
 @pytest.mark.parametrize(

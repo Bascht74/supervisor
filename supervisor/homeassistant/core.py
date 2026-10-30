@@ -906,6 +906,8 @@ class HomeAssistantCore(JobGroup):
                 if state.core_state == "RUNNING":
                     _LOGGER.info("Detect a running Home Assistant instance")
                     self._error_state = False
+                    # Discovery pushes are dropped until Core is running
+                    self.sys_discovery.retry_failed_pushes()
                     return
 
                 if state.offline_db_migration:

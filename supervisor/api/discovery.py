@@ -62,12 +62,14 @@ class APIDiscovery(CoreSysAttributes):
 
     def _list_messages(self) -> list[dict[str, Any]]:
         """Return discovery messages for started apps in V2 format."""
-        return [
-            self._message_data(message)
+        messages = [
+            message
             for message in self.sys_discovery.list_messages
             if (discovered := self.sys_apps.get_local_only(message.app))
             and discovered.state == AppState.STARTED
         ]
+        self.sys_discovery.forget_failed_pushes(messages)
+        return [self._message_data(message) for message in messages]
 
     @api_process
     @require_home_assistant

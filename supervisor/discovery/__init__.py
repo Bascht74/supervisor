@@ -41,6 +41,13 @@ class Message:
     uuid: str = field(default_factory=lambda: uuid4().hex, compare=False)
 
 
+@dataclass(slots=True, eq=False)
+class _Mark:
+    """Mark of a message that Home Assistant may have missed."""
+
+    failed: bool = False
+
+
 class Discovery(CoreSysAttributes, FileConfiguration):
     """Home Assistant Discovery handler."""
 
@@ -49,8 +56,8 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         super().__init__(FILE_HASSIO_DISCOVERY, SCHEMA_DISCOVERY_CONFIG)
         self.coresys: CoreSys = coresys
         self.message_obj: dict[str, Message] = {}
-        # Home Assistant may have missed these, so their next send is pushed
-        self._unannounced: dict[str, object] = {}
+        # Home Assistant may have missed these, so they are pushed again
+        self._unannounced: dict[str, _Mark] = {}
 
     async def load(self) -> None:
         """Load exists discovery message into storage."""
@@ -62,7 +69,7 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         _LOGGER.info("Loaded %d messages", len(messages))
         self.message_obj = messages
         # Supervisor does not know which of these Home Assistant has seen
-        self._unannounced = {uuid: object() for uuid in messages}
+        self._unannounced = {uuid: _Mark() for uuid in messages}
 
     async def save(self) -> None:
         """Write discovery message into data file."""
@@ -115,7 +122,7 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         """Push the messages of an app on their next send, even if unchanged."""
         for message in self.list_messages:
             if message.app == app.slug:
-                self._unannounced[message.uuid] = object()
+                self._unannounced[message.uuid] = _Mark()
 
     def push_messages(self, app: App) -> None:
         """Push all messages of an app, as Home Assistant may have missed them."""
@@ -124,6 +131,20 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         for message in self.list_messages:
             if message.app == app.slug:
                 self._push(app, message)
+
+    def retry_failed_pushes(self) -> None:
+        """Push the messages of started apps whose last push failed."""
+        for message in self.list_messages:
+            mark = self._unannounced.get(message.uuid)
+            app = self.sys_apps.get_local_only(message.app)
+            if mark and mark.failed and app and app.state == AppState.STARTED:
+                self._push(app, message)
+
+    def forget_failed_pushes(self, messages: list[Message]) -> None:
+        """Forget the failed pushes of messages Home Assistant listed itself."""
+        for message in messages:
+            if mark := self._unannounced.get(message.uuid):
+                mark.failed = False
 
     async def remove(self, message: Message) -> None:
         """Remove a discovery message from Home Assistant."""
@@ -148,17 +169,16 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         self,
         app: App,
         message: Message,
-        mark: object | None,
+        mark: _Mark | None,
         push: asyncio.Task[bool],
     ) -> None:
         """Clear the unannounced mark once Home Assistant got the message."""
+        delivered = not push.cancelled() and push.result()
         # Keep the mark that a restart during the push set for the next start
-        if (
-            not push.cancelled()
-            and push.result()
-            and app.state == AppState.STARTED
-            and self._unannounced.get(message.uuid) is mark
-        ):
+        if not mark or self._unannounced.get(message.uuid) is not mark:
+            return
+        mark.failed = not delivered
+        if delivered and app.state == AppState.STARTED:
             self._unannounced.pop(message.uuid, None)
 
     async def _push_discovery(self, message: Message, command: str) -> bool:

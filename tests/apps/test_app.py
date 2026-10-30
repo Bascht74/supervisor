@@ -415,6 +415,44 @@ async def test_app_healthcheck_during_discovery_push_pushes_again(
     websession.request.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    "container_state",
+    [
+        pytest.param(ContainerState.RUNNING, id="healthcheck_pending"),
+        pytest.param(ContainerState.UNHEALTHY, id="unhealthy"),
+    ],
+)
+async def test_app_not_ready_discovery_not_retried_when_core_runs(
+    coresys: CoreSys,
+    install_app_ssh: App,
+    websession: MagicMock,
+    container_state: ContainerState,
+) -> None:
+    """Test a failed push is not retried while the app is not ready for it."""
+    coresys.homeassistant.api._ensure_access_token = AsyncMock()  # pylint: disable=protected-access
+    websession.request.return_value = MockResponse()
+    force_app_state(install_app_ssh, AppState.STARTED)
+    await coresys.discovery.send(install_app_ssh, "test", {})
+    await coresys.block_till_done()
+
+    # The app restarts and sends before Home Assistant is running
+    coresys.homeassistant.api.get_api_state.return_value = None
+    force_app_state(install_app_ssh, AppState.STOPPED)
+    force_app_state(install_app_ssh, AppState.STARTUP)
+    await coresys.discovery.send(install_app_ssh, "test", {})
+    await coresys.block_till_done()
+    websession.request.reset_mock()
+
+    # The healthcheck is still pending or fails
+    install_app_ssh._update_state(container_state=container_state)  # pylint: disable=protected-access
+
+    # Supervisor sees Home Assistant run
+    coresys.homeassistant.api.get_api_state.return_value = APIState("RUNNING", False)
+    coresys.discovery.retry_failed_pushes()
+    await coresys.block_till_done()
+    websession.request.assert_not_called()
+
+
 async def test_app_unhealthy_after_startup_pushes_next_discovery_send(
     coresys: CoreSys,
     install_app_ssh: App,

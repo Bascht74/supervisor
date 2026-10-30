@@ -242,6 +242,43 @@ async def test_api_send_discovery_after_failed_push(
     websession.request.assert_not_called()
 
 
+async def test_api_list_discovery_forgets_failed_push(
+    api_client_with_prefix: tuple[TestClient, str],
+    coresys: CoreSys,
+    install_app_ssh: App,
+    websession: MagicMock,
+):
+    """Test a message Home Assistant listed is not pushed again once it runs.
+
+    On a host boot, apps start and send before Home Assistant lists the messages.
+    """
+    api_client, prefix = api_client_with_prefix
+    coresys.homeassistant.api._ensure_access_token = AsyncMock()  # pylint: disable=protected-access
+    websession.request.return_value = MockResponse()
+    force_app_state(install_app_ssh, AppState.STARTED)
+    await coresys.discovery.send(install_app_ssh, "test", {})
+    await coresys.block_till_done()
+
+    # After a restart of the app, its push fails while Home Assistant is down
+    coresys.homeassistant.api.get_api_state.return_value = None
+    force_app_state(install_app_ssh, AppState.STOPPED)
+    force_app_state(install_app_ssh, AppState.STARTED)
+    await coresys.discovery.send(install_app_ssh, "test", {})
+    await coresys.block_till_done()
+    websession.request.reset_mock()
+
+    # Home Assistant lists the message while it starts
+    resp = await api_client.get(f"{prefix}/discovery")
+    assert resp.status == 200
+    assert len((await resp.json())["data"]["discovery"]) == 1
+
+    # Supervisor sees Home Assistant run
+    coresys.homeassistant.api.get_api_state.return_value = APIState("RUNNING", False)
+    coresys.discovery.retry_failed_pushes()
+    await coresys.block_till_done()
+    websession.request.assert_not_called()
+
+
 async def test_api_invalid_discovery(
     app_api_client_with_prefix: tuple[TestClient, str],
     install_app_ssh: App,
