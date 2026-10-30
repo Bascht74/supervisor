@@ -108,9 +108,7 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         self.message_obj[message.uuid] = message
         await self.save()
 
-        mark = self._unannounced.get(message.uuid)
-        push = self.sys_create_task(self._push_discovery(message, CMD_NEW))
-        push.add_done_callback(partial(self._mark_announced, app, message, mark))
+        self._push(app, message)
         return message
 
     def mark_unannounced(self, app: App) -> None:
@@ -118,6 +116,14 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         for message in self.list_messages:
             if message.app == app.slug:
                 self._unannounced[message.uuid] = object()
+
+    def push_messages(self, app: App) -> None:
+        """Push all messages of an app, as Home Assistant may have missed them."""
+        # New marks, since a push from startup may still be running
+        self.mark_unannounced(app)
+        for message in self.list_messages:
+            if message.app == app.slug:
+                self._push(app, message)
 
     async def remove(self, message: Message) -> None:
         """Remove a discovery message from Home Assistant."""
@@ -131,6 +137,12 @@ class Discovery(CoreSysAttributes, FileConfiguration):
             message.app,
         )
         self.sys_create_task(self._push_discovery(message, CMD_DEL))
+
+    def _push(self, app: App, message: Message) -> None:
+        """Push a message to Home Assistant."""
+        mark = self._unannounced.get(message.uuid)
+        push = self.sys_create_task(self._push_discovery(message, CMD_NEW))
+        push.add_done_callback(partial(self._mark_announced, app, message, mark))
 
     def _mark_announced(
         self,
